@@ -1,0 +1,785 @@
+From 8d358eecc53685397aee1f38c7fd6081e7a7d882 Mon Sep 17 00:00:00 2001
+From: Rowhammer Team <Row@hammer.team>
+Date: Fri, 26 Apr 2024 22:54:38 -0400
+Subject: [PATCH] process_cts: Implemented JSON serialization
+
+process_cts: added JSON serialization
+
+Removed addition of msg to CT
+---
+ .gitignore        |   2 +
+ ref/Makefile      |  13 ++-
+ ref/ct_data.c     |  65 ++++++++++++++
+ ref/ct_data.h     |  33 +++++++
+ ref/indcpa.c      |  73 ++++++++++++++++
+ ref/indcpa.h      |   8 ++
+ ref/kem.c         |  64 ++++++++++++++
+ ref/kem.h         |   9 ++
+ ref/poly.c        |  36 ++++++++
+ ref/poly.h        |   5 ++
+ ref/polyvec.c     |  34 ++++++++
+ ref/polyvec.h     |   5 ++
+ ref/process_cts.c | 217 ++++++++++++++++++++++++++++++++++++++++++++++
+ 13 files changed, 561 insertions(+), 3 deletions(-)
+ create mode 100644 ref/ct_data.c
+ create mode 100644 ref/ct_data.h
+ create mode 100644 ref/process_cts.c
+
+diff --git a/.gitignore b/.gitignore
+index f8412e5..ea89b1f 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -4,3 +4,5 @@ tvecs512
+ tvecs512-90s
+ tvecs768
+ tvecs768-90s
++*.bin
++*.zip
+diff --git a/ref/Makefile b/ref/Makefile
+index 7004b73..87ce343 100644
+--- a/ref/Makefile
++++ b/ref/Makefile
+@@ -4,10 +4,10 @@ CFLAGS += -Wall -Wextra -Wpedantic -Wmissing-prototypes -Wredundant-decls \
+ NISTFLAGS += -Wno-unused-result -O3 -fomit-frame-pointer
+ RM = /bin/rm
+ 
+-SOURCES = kex.c kem.c indcpa.c polyvec.c poly.c ntt.c cbd.c reduce.c verify.c
++SOURCES = kex.c kem.c indcpa.c ct_data.c polyvec.c poly.c ntt.c cbd.c reduce.c verify.c
+ SOURCESKECCAK = $(SOURCES) fips202.c symmetric-shake.c
+ SOURCESNINETIES = $(SOURCES) sha256.c sha512.c aes256ctr.c symmetric-aes.c
+-HEADERS = params.h kex.h kem.h indcpa.h polyvec.h poly.h ntt.h cbd.h reduce.c verify.h symmetric.h
++HEADERS = params.h kex.h kem.h indcpa.h ct_data.h polyvec.h poly.h ntt.h cbd.h reduce.c verify.h symmetric.h
+ HEADERSKECCAK = $(HEADERS) fips202.h
+ HEADERSNINETIES = $(HEADERS) aes256ctr.h sha2.h
+ 
+@@ -31,7 +31,8 @@ all: \
+   test_kex1024-90s \
+   test_vectors512-90s \
+   test_vectors768-90s \
+-  test_vectors1024-90s
++  test_vectors1024-90s \
++	process_cts
+ 
+ speed: \
+   test_speed512 \
+@@ -70,6 +71,9 @@ libpqcrystals_kyber768_ref.so: $(SOURCES) $(HEADERS) symmetric-shake.c
+ libpqcrystals_kyber1024_ref.so: $(SOURCES) $(HEADERS) symmetric-shake.c
+ 	$(CC) -shared -fPIC $(CFLAGS) -DKYBER_K=4 $(SOURCES) symmetric-shake.c -o libpqcrystals_kyber1024_ref.so
+ 
++process_cts: $(SOURCESKECCAK) $(HEADERSKECCAK) process_cts.c randombytes.c
++	$(CC) $(CFLAGS) -DKYBER_K=4 $(SOURCESKECCAK) randombytes.c process_cts.c -o process_cts -l json-c
++
+ test_kyber512: $(SOURCESKECCAK) $(HEADERSKECCAK) test_kyber.c randombytes.c
+ 	$(CC) $(CFLAGS) -DKYBER_K=2 $(SOURCESKECCAK) randombytes.c test_kyber.c -o test_kyber512
+ 
+@@ -97,6 +101,8 @@ test_vectors768: $(SOURCESKECCAK) $(HEADERSKECCAK) test_vectors.c
+ test_vectors1024: $(SOURCESKECCAK) $(HEADERSKECCAK) test_vectors.c
+ 	$(CC) $(CFLAGS) -DKYBER_K=4 $(SOURCESKECCAK) test_vectors.c -o test_vectors1024
+ 
++
++
+ test_speed512: $(SOURCESKECCAK) $(HEADERSKECCAK) cpucycles.h cpucycles.c speed_print.h speed_print.c test_speed.c randombytes.c
+ 	$(CC) $(CFLAGS) -DKYBER_K=2 $(SOURCESKECCAK) randombytes.c cpucycles.c speed_print.c test_speed.c -o test_speed512
+ 
+@@ -201,3 +207,4 @@ clean:
+ 	-$(RM) -rf PQCgenKAT_kem512-90s
+ 	-$(RM) -rf PQCgenKAT_kem768-90s
+ 	-$(RM) -rf PQCgenKAT_kem1024-90s
++	-$(RM) -rf process_cts
+diff --git a/ref/ct_data.c b/ref/ct_data.c
+new file mode 100644
+index 0000000..c367092
+--- /dev/null
++++ b/ref/ct_data.c
+@@ -0,0 +1,65 @@
++#include <stdlib.h>
++#include "polyvec.h"
++#include "poly.h"
++#include "ct_data.h"
++
++ct_data_t *new_ct_data(void) {
++    ct_data_t* ct_data_pt = malloc(sizeof(*ct_data_pt));
++
++    if (ct_data_pt) { //Allocate internal types
++       ct_data_pt->sp = malloc(sizeof(*(ct_data_pt->sp)));
++       ct_data_pt->ep = malloc(sizeof(*(ct_data_pt->ep)));
++       ct_data_pt->b = malloc(sizeof(*(ct_data_pt->b)));
++       ct_data_pt->b_comp = malloc(sizeof(*(ct_data_pt->b_comp)));
++       ct_data_pt->v = malloc(sizeof(*(ct_data_pt->v)));
++       ct_data_pt->v_comp = malloc(sizeof(*(ct_data_pt->v_comp)));
++       ct_data_pt->epp = malloc(sizeof(*(ct_data_pt->epp)));
++    }
++    return ct_data_pt;
++}
++
++int init_ct_data(ct_data_t *ct_data,
++                 polyvec *sp,
++                 polyvec *ep,
++                 polyvec *b,
++                 poly *v,
++                 poly *epp) {
++    
++    if (!ct_data->sp || !ct_data->ep 
++       || !ct_data->b || !ct_data->v
++       || !ct_data->epp)
++        return -1;
++
++    polyvec_copy(ct_data->sp, sp);
++    polyvec_copy(ct_data->ep, ep);
++    polyvec_copy(ct_data->b, b);
++    poly_copy(ct_data->v, v);
++    poly_copy(ct_data->epp, epp);
++    return 0;
++}
++
++int free_ct_data(ct_data_t **pt) {
++    
++    if ((*pt) != NULL) {
++        if ((*pt)->sp != NULL)
++            free((*pt)->sp);
++        if ((*pt)->ep != NULL)
++            free((*pt)->ep);
++        if ((*pt)->b != NULL)
++            free((*pt)->b);
++        if ((*pt)->b_comp != NULL)
++            free((*pt)->b_comp);
++        if ((*pt)->v != NULL)
++            free((*pt)->v);
++        if ((*pt)->v_comp != NULL)
++            free((*pt)->v_comp);
++        if ((*pt)->epp != NULL)
++            free((*pt)->epp);
++
++        free(*pt);
++        *pt = NULL;
++        return 0;
++    }
++
++    return -1; // Caught potential double free()
++}
+diff --git a/ref/ct_data.h b/ref/ct_data.h
+new file mode 100644
+index 0000000..30cab75
+--- /dev/null
++++ b/ref/ct_data.h
+@@ -0,0 +1,33 @@
++#ifndef CT_DATA_H
++#define CT_DATA_H
++
++#include <stdint.h>
++#include "params.h"
++#include "poly.h"
++#include "polyvec.h"
++
++typedef struct CT_DATA {
++    polyvec *sp;
++    polyvec *ep;
++    polyvec *b;
++    polyvec *b_comp; //Decompress(Compress(b))
++    poly *v;
++    poly *v_comp; //Decompress(Compress(v))
++    poly *epp;
++} ct_data_t;
++
++#define new_ct_data KYBER_NAMESPACE(new_ct_data)
++ct_data_t *new_ct_data(void);
++
++#define init_ct_data KYBER_NAMESPACE(init_ct_data)
++int init_ct_data(ct_data_t *ct_data,
++                 polyvec *sp,
++                 polyvec *ep,
++                 polyvec *b,
++                 poly *v,
++                 poly *epp);
++
++#define free_ct_data KYBER_NAMESPACE(free_ct_data)
++int free_ct_data(ct_data_t **pt);
++
++#endif // !CT_DATA_H
+diff --git a/ref/indcpa.c b/ref/indcpa.c
+index 60f4059..df17b64 100644
+--- a/ref/indcpa.c
++++ b/ref/indcpa.c
+@@ -7,6 +7,7 @@
+ #include "ntt.h"
+ #include "symmetric.h"
+ #include "randombytes.h"
++#include "ct_data.h"
+ 
+ /*************************************************
+ * Name:        pack_pk
+@@ -238,6 +239,78 @@ void indcpa_keypair(uint8_t pk[KYBER_INDCPA_PUBLICKEYBYTES],
+   pack_pk(pk, &pkpv, publicseed);
+ }
+ 
++/*************************************************
++* Name:        indcpa_enc_exfil
++*
++* Description: Encryption function of the CPA-secure
++*              public-key encryption scheme underlying Kyber.
++*              Takes an additional pointer to a struct that will store
++*              internal values from encryption to be used during key recovery
++*
++* Arguments:   - uint8_t *c: pointer to output ciphertext
++*                            (of length KYBER_INDCPA_BYTES bytes)
++*              - const uint8_t *m: pointer to input message
++*                                  (of length KYBER_INDCPA_MSGBYTES bytes)
++*              - const uint8_t *pk: pointer to input public key
++*                                   (of length KYBER_INDCPA_PUBLICKEYBYTES)
++*              - const uint8_t *coins: pointer to input random coins used as seed
++*                                      (of length KYBER_SYMBYTES) to deterministically
++*                                      generate all randomness
++**************************************************/
++void indcpa_enc_exfil(ct_data_t *ct_data,
++                uint8_t c[KYBER_INDCPA_BYTES],
++                const uint8_t m[KYBER_INDCPA_MSGBYTES],
++                const uint8_t pk[KYBER_INDCPA_PUBLICKEYBYTES],
++                const uint8_t coins[KYBER_SYMBYTES])
++{
++  unsigned int i;
++  uint8_t seed[KYBER_SYMBYTES];
++  uint8_t nonce = 0;
++  polyvec sp, pkpv, ep, at[KYBER_K], b;
++  poly v, k, epp;
++
++  unpack_pk(&pkpv, seed, pk);
++  poly_frommsg(&k, m);
++  gen_at(at, seed);
++
++  for(i=0;i<KYBER_K;i++)
++    poly_getnoise_eta1(sp.vec+i, coins, nonce++);
++  for(i=0;i<KYBER_K;i++)
++    poly_getnoise_eta2(ep.vec+i, coins, nonce++);
++  poly_getnoise_eta2(&epp, coins, nonce++);
++
++  // initialize exfiltration data structure. b and v not calculated yet.
++  init_ct_data(ct_data, &sp, &ep, &b, &v, &epp);
++  polyvec_ntt(&sp);
++
++  // matrix-vector multiplication
++  for(i=0;i<KYBER_K;i++)
++    polyvec_basemul_acc_montgomery(&b.vec[i], &at[i], &sp);
++
++  polyvec_basemul_acc_montgomery(&v, &pkpv, &sp);
++
++  polyvec_invntt_tomont(&b);
++  poly_invntt_tomont(&v);
++
++  polyvec_add(&b, &b, &ep);
++  poly_add(&v, &v, &epp);
++  // poly_add(&v, &v, &k);
++  /* Don't yse msg when adding to ct. */
++  polyvec_reduce(&b);
++  poly_reduce(&v);
++ 
++  // Copy uncompressed b and v to ct_data
++  polyvec_copy(ct_data->b, &b);
++  poly_copy(ct_data->v, &v);
++
++  pack_ciphertext(c, &b, &v);
++
++  // Decompress and store in ct_data
++  unpack_ciphertext(&b, &v, c);
++  polyvec_copy(ct_data->b_comp, &b);
++  poly_copy(ct_data->v_comp, &v);
++}
++
+ /*************************************************
+ * Name:        indcpa_enc
+ *
+diff --git a/ref/indcpa.h b/ref/indcpa.h
+index 57bd5ea..dc8af26 100644
+--- a/ref/indcpa.h
++++ b/ref/indcpa.h
+@@ -4,6 +4,7 @@
+ #include <stdint.h>
+ #include "params.h"
+ #include "polyvec.h"
++#include "ct_data.h"
+ 
+ #define gen_matrix KYBER_NAMESPACE(gen_matrix)
+ void gen_matrix(polyvec *a, const uint8_t seed[KYBER_SYMBYTES], int transposed);
+@@ -11,6 +12,13 @@ void gen_matrix(polyvec *a, const uint8_t seed[KYBER_SYMBYTES], int transposed);
+ void indcpa_keypair(uint8_t pk[KYBER_INDCPA_PUBLICKEYBYTES],
+                     uint8_t sk[KYBER_INDCPA_SECRETKEYBYTES]);
+ 
++#define incpa_enc_exfil KYBER_NAMESPACE(indcpa_enc_exfil)
++void indcpa_enc_exfil(ct_data_t *ct_data,
++                uint8_t c[KYBER_INDCPA_BYTES],
++                const uint8_t m[KYBER_INDCPA_MSGBYTES],
++                const uint8_t pk[KYBER_INDCPA_PUBLICKEYBYTES],
++                const uint8_t coins[KYBER_SYMBYTES]);
++
+ #define indcpa_enc KYBER_NAMESPACE(indcpa_enc)
+ void indcpa_enc(uint8_t c[KYBER_INDCPA_BYTES],
+                 const uint8_t m[KYBER_INDCPA_MSGBYTES],
+diff --git a/ref/kem.c b/ref/kem.c
+index f376bd2..f91a57b 100644
+--- a/ref/kem.c
++++ b/ref/kem.c
+@@ -1,3 +1,4 @@
++#include <stdio.h>
+ #include <stddef.h>
+ #include <stdint.h>
+ #include "params.h"
+@@ -6,6 +7,7 @@
+ #include "verify.h"
+ #include "symmetric.h"
+ #include "randombytes.h"
++#include "ct_data.h"
+ 
+ /*************************************************
+ * Name:        crypto_kem_keypair
+@@ -74,6 +76,68 @@ int crypto_kem_enc(uint8_t *ct,
+   return 0;
+ }
+ 
++/*************************************************
++* Name:        crypto_kem_enc_exfil
++*
++* Description: Generates cipher text and shared
++*              secret for given public key
++*
++* Arguments:   - uint8_t *ct: pointer to output cipher text
++*                (an already allocated array of KYBER_CIPHERTEXTBYTES bytes)
++*              - uint8_t *ss: pointer to output shared secret
++*                (an already allocated array of KYBER_SSBYTES bytes)
++*              - const uint8_t *pk: pointer to input public key
++*                (an already allocated array of KYBER_PUBLICKEYBYTES bytes)
++*
++* Returns 0 (success)
++**************************************************/
++int crypto_kem_enc_exfil(const uint64_t seed,
++                   ct_data_t* ct_data,
++                   uint8_t *ct,
++                   uint8_t *ss,
++                   const uint8_t *pk
++                   )
++{
++  uint8_t buf[2*KYBER_SYMBYTES] = {0};
++  /* Will contain key, coins */
++  uint8_t kr[2*KYBER_SYMBYTES];
++
++  int i = 0;
++  int val = 0;
++  // for(i = sizeof(long)-1; i > -1; i--) {
++  //   val = (seed >> ((sizeof(long)*i)))%256;
++  //   // printf("%d,",val);
++  //   // printf("%d,%d,%ld\n",KYBER_SYMBYTES,i,(sizeof(long)-i)*8);
++  //   buf[KYBER_SYMBYTES-i-1] = val;
++  // }
++  for(i = 0; i < sizeof(long); i++) {
++    val = (seed >> ((sizeof(long)*i)))%256;
++    // printf("%d,",val);
++    // printf("%d,%d,%ld\n",KYBER_SYMBYTES,i,(sizeof(long)-i)*8);
++    buf[i] = val;
++  }
++  // printf("\n");
++  // printf("buf: ");
++  // for(i=0;i<KYBER_SYMBYTES;i++){
++  //  printf("%d, ",buf[i]);
++  // }
++  // printf("\n");
++  /* Don't release system RNG output */
++  hash_h(buf, buf, KYBER_SYMBYTES);
++
++  /* Multitarget countermeasure for coins + contributory KEM */
++  hash_h(buf+KYBER_SYMBYTES, pk, KYBER_PUBLICKEYBYTES);
++  hash_g(kr, buf, 2*KYBER_SYMBYTES);
++
++  /* coins are in kr+KYBER_SYMBYTES */
++  indcpa_enc_exfil(ct_data, ct, buf, pk, kr+KYBER_SYMBYTES);
++
++  /* overwrite coins in kr with H(c) */
++  hash_h(kr+KYBER_SYMBYTES, ct, KYBER_CIPHERTEXTBYTES);
++  /* hash concatenation of pre-k and H(c) to k */
++  kdf(ss, kr, 2*KYBER_SYMBYTES);
++  return 0;
++}
+ /*************************************************
+ * Name:        crypto_kem_dec
+ *
+diff --git a/ref/kem.h b/ref/kem.h
+index 3f3eff6..7fc9b6c 100644
+--- a/ref/kem.h
++++ b/ref/kem.h
+@@ -3,6 +3,7 @@
+ 
+ #include <stdint.h>
+ #include "params.h"
++#include "ct_data.h"
+ 
+ #define CRYPTO_SECRETKEYBYTES  KYBER_SECRETKEYBYTES
+ #define CRYPTO_PUBLICKEYBYTES  KYBER_PUBLICKEYBYTES
+@@ -32,6 +33,14 @@
+ #define crypto_kem_keypair KYBER_NAMESPACE(keypair)
+ int crypto_kem_keypair(uint8_t *pk, uint8_t *sk);
+ 
++#define crypto_kem_enc_exfil KYBER_NAMESPACE(enc_exfil)
++int crypto_kem_enc_exfil(const uint64_t seed,
++                   ct_data_t* ct_data,
++                   uint8_t *ct,
++                   uint8_t *ss,
++                   const uint8_t *pk
++                   );
++
+ #define crypto_kem_enc KYBER_NAMESPACE(enc)
+ int crypto_kem_enc(uint8_t *ct, uint8_t *ss, const uint8_t *pk);
+ 
+diff --git a/ref/poly.c b/ref/poly.c
+index 3e73579..035936d 100644
+--- a/ref/poly.c
++++ b/ref/poly.c
+@@ -1,4 +1,5 @@
+ #include <stdint.h>
++#include <stdio.h>
+ #include "params.h"
+ #include "poly.h"
+ #include "ntt.h"
+@@ -6,6 +7,41 @@
+ #include "cbd.h"
+ #include "symmetric.h"
+ 
++/*************************************************
++* Name:        poly_copy
++*
++* Description: deep copy of poly struct
++*
++*              - poly *in: pointer to input polynomial
++*              - poly *out: pointer to output polynomial
++**************************************************/
++void poly_copy(poly *out, poly *in)
++{
++  unsigned int i;  
++  for(i = 0; i < KYBER_N; i++) {
++    out->coeffs[i] = in->coeffs[i];  
++  }
++}
++
++/*************************************************
++* Name:        poly_print
++*
++* Description: print the coefficients of a polynomial
++*
++*              - poly *a: pointer to input polynomial
++**************************************************/
++void poly_print(const poly *a)
++{
++  unsigned int i;
++  for(i = 0; i < KYBER_N; i++) {
++    printf("%04d ", a->coeffs[i]);
++    if(i % 16 == 15) {
++      printf("\n");
++    }
++  printf("\n");
++  }
++}
++
+ /*************************************************
+ * Name:        poly_compress
+ *
+diff --git a/ref/poly.h b/ref/poly.h
+index 9a99c7c..32c77c0 100644
+--- a/ref/poly.h
++++ b/ref/poly.h
+@@ -12,6 +12,11 @@ typedef struct{
+   int16_t coeffs[KYBER_N];
+ } poly;
+ 
++#define poly_copy KYBER_NAMESPACE(poly_copy)
++void poly_copy(poly *out, poly *in);
++#define poly_print KYBER_NAMESPACE(poly_print)
++void poly_print(const poly *a);
++
+ #define poly_compress KYBER_NAMESPACE(poly_compress)
+ void poly_compress(uint8_t r[KYBER_POLYCOMPRESSEDBYTES], const poly *a);
+ #define poly_decompress KYBER_NAMESPACE(poly_decompress)
+diff --git a/ref/polyvec.c b/ref/polyvec.c
+index 669f6a5..48ffadd 100644
+--- a/ref/polyvec.c
++++ b/ref/polyvec.c
+@@ -1,8 +1,42 @@
++#include <stdio.h>
+ #include <stdint.h>
+ #include "params.h"
+ #include "poly.h"
+ #include "polyvec.h"
+ 
++/*************************************************
++* Name:        polyvec_copy
++*
++* Description: deep copy of polyvec struct
++*
++*              - polyvec *in: pointer to input polyvec
++*              - polyvec *out: pointer to output polyvec
++**************************************************/
++void polyvec_copy(polyvec *out, polyvec *in)
++{
++  unsigned int i;  
++  for(i = 0; i < KYBER_K; i++) {
++    poly_copy(&out->vec[i], &in->vec[i]);  
++  }
++}
++
++/*************************************************
++* Name:        polyvec_print
++*
++* Description: print the coefficients of a polyvec
++*
++*              - const polyvec *a: pointer to input polyvec
++**************************************************/
++void polyvec_print(const polyvec *a)
++{
++  unsigned int i;
++  for(i = 0; i < KYBER_K; i++) {
++    printf("[%d]: ", i);
++    poly_print(&a->vec[i]);
++    printf("\n");
++  }
++}
++
+ /*************************************************
+ * Name:        polyvec_compress
+ *
+diff --git a/ref/polyvec.h b/ref/polyvec.h
+index 57b6054..f33abea 100644
+--- a/ref/polyvec.h
++++ b/ref/polyvec.h
+@@ -9,6 +9,11 @@ typedef struct{
+   poly vec[KYBER_K];
+ } polyvec;
+ 
++#define polyvec_copy KYBER_NAMESPACE(polyvec_copy)
++void polyvec_copy(polyvec *out, polyvec *in);
++#define polyvec_print KYBER_NAMESPACE(polyvec_print)
++void polyvec_print(const polyvec *a);
++
+ #define polyvec_compress KYBER_NAMESPACE(polyvec_compress)
+ void polyvec_compress(uint8_t r[KYBER_POLYVECCOMPRESSEDBYTES], const polyvec *a);
+ #define polyvec_decompress KYBER_NAMESPACE(polyvec_decompress)
+diff --git a/ref/process_cts.c b/ref/process_cts.c
+new file mode 100644
+index 0000000..fde571e
+--- /dev/null
++++ b/ref/process_cts.c
+@@ -0,0 +1,217 @@
++#include <json-c/json.h>
++#include <json-c/json_object.h>
++#include <stdint.h>
++#include <string.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <dirent.h>
++#include <json-c/json.h>
++#include "kem.h"
++#include "ct_data.h"
++#include "params.h"
++#include "poly.h"
++
++void process_ct_dir(char *dirname, uint8_t *pk);
++ct_data_t* process_ct_file(char *path, uint8_t *pk, uint64_t seed);
++uint8_t* load_ct_from_file(const char *path);
++json_object* json_object_new_poly(poly *a);
++json_object* json_object_new_polyvec(polyvec *a);
++json_object* ct_data_to_json(ct_data_t *ct_data);
++
++uint8_t* load_ct_from_file(const char *path)
++{
++    uint8_t *ct = malloc(sizeof(*ct) * KYBER_CIPHERTEXTBYTES);
++
++    FILE *ct_file = fopen(path, "r");
++    if (!ct_file) {
++        fprintf(stderr, "Cannot open ct file at %s\n", path);
++        return NULL;
++    }
++    
++    if (fread(ct, sizeof(*ct), KYBER_CIPHERTEXTBYTES, ct_file) != KYBER_CIPHERTEXTBYTES) {
++        perror("Error reading ciphertext file!");
++        free(ct);
++        fclose(ct_file);
++        return NULL;
++    }
++    
++    fclose(ct_file);
++    return ct;
++}
++
++ct_data_t* process_ct_file(char *path, uint8_t *pk, uint64_t seed)
++{
++    ct_data_t *ct_data;
++    uint8_t *ct_in;
++    uint8_t ct_out[KYBER_CIPHERTEXTBYTES];
++    uint8_t ss[KYBER_SSBYTES];
++    
++    ct_in = load_ct_from_file(path);
++    if(!ct_in) {
++        return NULL;    
++    }       
++
++    ct_data = new_ct_data();
++    if (!ct_data) {
++        perror("Unable to allocate ct data struct");
++        return NULL;
++    }
++
++    // Use ct filename as seed for regenerating the ct. Store exfiltrated data in ct_data
++    crypto_kem_enc_exfil(seed, ct_data, ct_out, ss, pk); 
++    // crypto_kem_enc(ct_out, ss, pk); 
++    
++    if (memcmp(ct_in, ct_out, KYBER_CIPHERTEXTBYTES) == 0) {
++        printf("CTs match!\n");
++    }
++
++    free(ct_in);
++    return ct_data;
++}
++
++json_object* json_object_new_poly(poly *a)
++{
++    int i;
++    json_object *jpoly = json_object_new_array_ext(KYBER_N);
++    for (i = 0; i < KYBER_N; i++) {
++        json_object *coeff = json_object_new_int64(a->coeffs[i]);
++        json_object_array_add(jpoly, coeff);
++    }
++    
++    return jpoly;
++}
++
++json_object* json_object_new_polyvec(polyvec *a)
++{
++    int i;
++    char idx[10];
++    json_object *jpolyvec = json_object_new_object();
++    for (i = 0; i < KYBER_K; i++) {
++        json_object *jpoly = json_object_new_poly(&a->vec[i]);
++        snprintf(idx, 10, "%d", i);
++        json_object_object_add(jpolyvec, idx, jpoly);
++    }
++
++    return jpolyvec;
++}
++
++json_object* ct_data_to_json(ct_data_t *ct_data)
++{
++    /*Creating a json object*/
++    json_object *jct_data = json_object_new_object();
++  
++    /* Use ct_data fields to create json objects */
++    json_object *ep = json_object_new_polyvec(ct_data->ep);
++    json_object *sp = json_object_new_polyvec(ct_data->sp);
++    json_object *epp = json_object_new_poly(ct_data->epp);
++    json_object *b = json_object_new_polyvec(ct_data->b);
++    json_object *b_comp = json_object_new_polyvec(ct_data->b_comp);
++    json_object *v = json_object_new_poly(ct_data->v);
++    json_object *v_comp = json_object_new_poly(ct_data->v_comp);
++    
++    /* Add them to the main object */
++    json_object_object_add(jct_data, "ep", ep);
++    json_object_object_add(jct_data, "sp", sp);
++    json_object_object_add(jct_data, "epp", epp);
++    json_object_object_add(jct_data, "b", b);
++    json_object_object_add(jct_data, "b_comp", b_comp);
++    json_object_object_add(jct_data, "v", v);
++    json_object_object_add(jct_data, "v_comp", v_comp);
++
++    /*Now printing the json object*/
++    return jct_data;
++}
++
++void process_ct_dir(char *dirname, uint8_t *pk)
++{
++    DIR *dir;
++    FILE *outfile;
++    struct dirent *ent;
++    char *path;
++    char *serialized_json;
++    ct_data_t *ct_data;
++    uint64_t seed = 0;
++
++    size_t path_size;
++
++    printf("First pass on '%s':\n",dirname);
++    if ((dir = opendir(dirname)) == NULL)
++    {
++        perror("Unable to open directory");
++        exit(1);
++    }
++    
++    while ((ent = readdir(dir)) != NULL) {
++        path_size = (strlen(dirname) + strlen(ent->d_name) + 3) * sizeof(*dirname); // +2 for NULL term and '/'
++        path = malloc(path_size);
++        strlcpy(path, dirname, path_size);
++        strlcat(path, "/", path_size);
++        strlcat(path, ent->d_name, path_size);
++ 
++        // printf("%s\n", path);
++        // printf("%s\n",ent->d_name);
++        // Parse seed from ct filename
++        sscanf(ent->d_name + 2, "%lu", &seed);
++        printf("%lu\n", seed);
++        // Load ct file into ct array
++
++        ct_data = process_ct_file(path, pk, seed);
++        if (ct_data == NULL) {
++            free(path);
++            continue;
++        }
++
++        /* Convert ct_data into json */
++        json_object *jct_data = ct_data_to_json(ct_data);
++        
++        /* Save json file */
++        strlcpy(strstr(path, "bin"), "json", 5);
++        printf("%s\n", path);
++
++        outfile = fopen(path, "w");
++        serialized_json = json_object_to_json_string(jct_data);
++        fwrite(serialized_json, sizeof(char), strlen(serialized_json), outfile);
++
++        fclose(outfile);
++        // printf ("The json object created: %s", json_object_to_json_string(jct_data));
++        json_object_put(jct_data);
++
++        free_ct_data(&ct_data);
++        free(path);
++    }
++
++
++     //   printf("Second pass on '%s':\n",dirname);
++     //
++     //   rewinddir(dir);
++     //   while ((ent = readdir(dir)) != NULL)
++     //     printf("%s\n",ent->d_name);
++    if (closedir(dir) != 0)
++        perror("Unable to close directory");
++}
++
++int main(int argc, char **argv)
++{
++    uint8_t pk[KYBER_PUBLICKEYBYTES];
++    if (argc < 3) {
++        printf("Usage: process_cts <pk file> <ct directory>");
++        return 1;
++    }
++    // Load pk
++    FILE *pk_file = fopen(argv[1], "r");
++    if (!pk_file) {
++        perror("Can't read public key file!");
++        return 2;
++    }
++    
++    if(fread(pk, sizeof(*pk), KYBER_PUBLICKEYBYTES, pk_file) != KYBER_PUBLICKEYBYTES) {
++        perror("pk file not read into pk buffer!");
++        return 3;
++    }
++
++    process_ct_dir(argv[2], pk);
++    
++    fclose(pk_file);
++
++    return EXIT_SUCCESS;
++}
+-- 
+2.45.1
+
